@@ -137,7 +137,7 @@ input[readonly]{color:var(--muted)}
         <label><span>Semester <span class="auto" data-auto="sem" hidden>from report</span></span><select id="f-sem"><option value="">—</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option></select></label>
         <label><span>Academic year <span class="auto" data-auto="ay" hidden>from report date</span></span><input id="f-ay" placeholder="e.g. 2025-26"></label>
         <label>Programme<input id="f-prog" readonly></label>
-        <label>Report generated on<input id="f-rdate" readonly></label>
+        <label><span>Report generated on <span class="auto" id="rdate-tag" hidden></span></span><input id="f-rdate" placeholder="dd-mm-yyyy"></label>
         <label>Course name <span class="hint" style="font-weight:400">(optional, not in report)</span><input id="f-cname" placeholder="e.g. Optical Communication"></label>
         <label>Section <span class="hint" style="font-weight:400">(optional, not in report)</span><input id="f-sec" placeholder="e.g. A"></label>
       </div>
@@ -471,7 +471,9 @@ function readFile(file){
       if(p.meta.code){ $('f-code').value=p.meta.code; filled.push('course code'); } else missing.push('course code');
       if(p.meta.sem){ $('f-sem').value=p.meta.sem; filled.push('semester'); } else missing.push('semester');
       if(p.meta.ay){ $('f-ay').value=p.meta.ay; filled.push('academic year'); }
-      $('f-prog').value=p.meta.program||''; $('f-rdate').value=p.meta.reportDate||'';
+      $('f-prog').value=p.meta.program||''; { const el=$('f-rdate'); delete el.dataset.edited;
+        if(p.meta.reportDate){ el.value=p.meta.reportDate; el.dataset.src='report'; setDateTag('from report'); }
+        else { el.dataset.src=''; if(!$('f-ay').value) $('f-ay').value=defaultAy($('f-sem').value); autoDate(); } }
       document.querySelectorAll('[data-auto]').forEach(el=>{ const k=el.dataset.auto; el.hidden=!({faculty:fac,code:p.meta.code,sem:p.meta.sem,ay:p.meta.ay}[k]); });
       $('details-step').hidden=false;
       msg('parse-msg',`Read ${students.length} students from “${file.name}”. Filled from the report: ${filled.join(', ')||'nothing'}.`+(missing.length?` Please select or type: ${missing.join(', ')}.`:'')+(p.warnings.length?' '+p.warnings.join(' '):''),missing.length||p.warnings.length?'':'ok');
@@ -487,6 +489,21 @@ function readFile(file){
 ['f-maxt','f-maxq','f-nb','f-ties'].forEach(id=>$(id).addEventListener('input',()=>{ if(id==='f-nb'&&$('f-wmode').value==='bottom'&&!$('f-wp').dataset.touchedB) $('f-wp').value=$('f-nb').value; render();}));
 $('f-wp').addEventListener('input',()=>{ if($('f-wmode').value==='bottom') $('f-wp').dataset.touchedB='1'; render();});
 $('f-wmode').addEventListener('change',()=>{syncWLabel();render();});
+// ---- report date: editable; random working day in the term when the report has none
+function defaultAy(sem){ const t=new Date(), Y=t.getFullYear(), mo=t.getMonth()+1;
+  const odd=sem?Number(sem)%2===1:mo>=6; const st=odd?(mo>=6?Y:Y-1):(mo<=8?Y-1:Y); return `${st}-${String(st+1).slice(-2)}`; }
+function randomReportDate(ay,sem){
+  const m=String(ay||'').match(/(\d{4})/); if(!m) return '';
+  const y0=Number(m[1]), odd=sem?Number(sem)%2===1:true;
+  const a=odd?new Date(y0,8,1):new Date(y0+1,1,1), b=odd?new Date(y0,10,30):new Date(y0+1,4,31);
+  let d; do{ d=new Date(a.getTime()+Math.random()*(b-a)); }while(d.getDay()===0);
+  return `${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}`;
+}
+function setDateTag(t){ const g=$('rdate-tag'); g.hidden=!t; g.textContent=t||''; }
+function autoDate(){ const el=$('f-rdate'); if(el.dataset.src==='report'||el.dataset.edited) return;
+  el.value=randomReportDate($('f-ay').value,$('f-sem').value); el.dataset.src='auto'; setDateTag(el.value?'auto-picked':''); }
+$('f-rdate').addEventListener('input',()=>{ $('f-rdate').dataset.edited='1'; setDateTag(''); });
+['f-ay','f-sem'].forEach(id=>$(id).addEventListener('change',autoDate));
 $('f-faculty').addEventListener('change',()=>{try{localStorage.setItem('lc-faculty',$('f-faculty').value);}catch(e){}});
 
 // ---- settings: paste the Google Apps Script web-app URL here to collect submissions in a Google Sheet
