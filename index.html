@@ -191,11 +191,17 @@ input[readonly]{color:var(--muted)}
 <section id="view-consol" class="stack" hidden>
   <div class="panel">
     <h2>Consolidated bright &amp; weak learners</h2>
-    <div class="hint">Shows every subject uploaded by faculty. Enter the coordinator passcode to load the data.</div>
+    <div class="hint">Sign in with the department coordinator account to view faculty submissions and download consolidated reports.</div>
     <div id="c-setup" class="note" hidden></div>
-    <div class="grid">
-      <label>Coordinator passcode<input id="c-pass" type="password" autocomplete="off" placeholder="Passcode"></label>
-      <div class="row" style="align-self:end"><button class="btn primary" id="c-load" type="button">Load submissions</button></div>
+    <div id="c-login" class="grid">
+      <label>Coordinator username<input id="c-username" type="text" autocomplete="username" placeholder="Username"></label>
+      <label>Coordinator password<input id="c-password" type="password" autocomplete="current-password" placeholder="Password"></label>
+      <div class="row" style="align-self:end"><button class="btn primary" id="c-login-btn" type="button">Sign in</button></div>
+    </div>
+    <div id="c-session" class="row" hidden>
+      <span class="hint" id="c-session-label">Signed in</span>
+      <button class="btn small" id="c-refresh" type="button">Refresh submissions</button>
+      <button class="btn small danger" id="c-logout" type="button">Logout</button>
     </div>
     <div id="c-msg" hidden></div>
   </div>
@@ -585,7 +591,7 @@ $('f-rdate').addEventListener('input',()=>{ $('f-rdate').dataset.edited='1'; set
 ['f-ay','f-sem'].forEach(id=>$(id).addEventListener('change',autoDate));
 $('f-faculty').addEventListener('change',()=>{try{localStorage.setItem('lc-faculty',$('f-faculty').value);}catch(e){}});
 
-// ---- settings: paste the Google Apps Script web-app URL here to collect submissions in a Google Sheet
+// ---- Google Apps Script web-app URL used for faculty uploads and coordinator login
 const SHEET_URL='https://script.google.com/macros/s/AKfycbzYjyop-YyBlXEyJM5TDA11ZnH4cjLhAFzkwVHzuFycxLNqwuYTGtsjHFGSM6lTSVOQ/exec';
 const capsReady=Promise.resolve();
 const downloads={save:async({filename,data})=>{
@@ -659,7 +665,7 @@ function showTab(w){
   const c=w==='consol';
   $('view-submit').hidden=c; $('view-consol').hidden=!c;
   $('t-submit').setAttribute('aria-selected',String(!c)); $('t-consol').setAttribute('aria-selected',String(c));
-  if(c){ $('c-setup').textContent='The department sheet is not connected yet. Paste the Google Apps Script web-app URL into SHEET_URL in the page code, then reload.'; $('c-setup').hidden=sheetReady(); }
+  if(c){ $('c-setup').textContent='The department sheet is not connected yet. Check the Google Apps Script web-app URL in SHEET_URL.'; $('c-setup').hidden=sheetReady(); if(getCoordinatorToken()) { showCoordinatorSession(true,'coordinator'); cRefresh(); } }
 }
 $('t-submit').onclick=()=>showTab('submit'); $('t-consol').onclick=()=>showTab('consol');
 
@@ -720,23 +726,75 @@ function cRender(){
     sb.rows.map((x,i)=>`<tr><td class="num">${i+1}</td><td class="usn">${esc(x.usn)}</td><td>${esc(x.name)}</td><td class="num">${esc(mark(x.t1))}</td><td class="num">${esc(mark(x.q1))}</td><td class="num">${esc(x.total)}</td><td>${tagC(x.category)}</td></tr>`).join('')+
     '</tbody></table></div></div>').join('')+'</div>').join(''):'<div class="hint">No students match these filters.</div>';
 }
-async function cLoad(){
-  if(!sheetReady()){ msg('c-msg','The department sheet is not connected yet.','err'); return; }
-  const pass=$('c-pass').value.trim();
-  if(!pass){ msg('c-msg','Enter the coordinator passcode.','err'); return; }
-  msg('c-msg','Loading submissions…','ok'); $('c-load').disabled=true;
-  try{
-    const r=await fetch(SHEET_URL+(SHEET_URL.includes('?')?'&':'?')+'pass='+encodeURIComponent(pass));
-    const d=await r.json();
-    if(d.error){ msg('c-msg',d.error,'err'); $('c-body').hidden=true; return; }
-    C={subs:d.subs||[],students:d.students||[]};
-    msg('c-msg',C.subs.length?`Loaded ${C.subs.length} subject upload(s) from ${new Set(C.subs.map(s=>s.faculty)).size} faculty.`:'Connected, but no faculty has uploaded a subject yet.','ok');
-    $('c-body').hidden=false; cFill(); cRender();
-  }catch(e){ msg('c-msg','Could not reach the sheet. Check the web-app URL, that access is set to “Anyone”, and your internet connection.','err'); }
-  finally{ $('c-load').disabled=false; }
+// Coordinator API: form POST into a hidden iframe avoids putting credentials or
+// session tokens in URLs and avoids relying on cross-origin fetch response headers.
+function coordinatorPost(action, fields){
+  return new Promise((resolve,reject)=>{
+    const requestId=(window.crypto&&window.crypto.randomUUID)?window.crypto.randomUUID():String(Date.now())+'-'+Math.random().toString(36).slice(2);
+    const frame=document.createElement('iframe');
+    const frameName='ete-coord-'+requestId.replace(/[^a-zA-Z0-9]/g,'');
+    frame.name=frameName; frame.style.display='none'; frame.setAttribute('aria-hidden','true');
+    const form=document.createElement('form'); form.method='POST'; form.action=SHEET_URL; form.target=frameName; form.style.display='none';
+    const values={action,requestId,...(fields||{})};
+    Object.keys(values).forEach(k=>{const input=document.createElement('input');input.type='hidden';input.name=k;input.value=String(values[k]??'');form.appendChild(input);});
+    let finished=false;
+    const cleanup=()=>{window.removeEventListener('message',onMessage);form.remove();frame.remove();clearTimeout(timer);};
+    const onMessage=event=>{
+      let originHost='';try{originHost=new URL(event.origin).hostname;}catch(e){return;}
+      if(!originHost.endsWith('.googleusercontent.com')) return;
+      const d=event.data;
+      if(!d||d.channel!=='ETE_COORDINATOR'||d.requestId!==requestId) return;
+      finished=true; cleanup(); resolve(d.data);
+    };
+    const timer=setTimeout(()=>{if(!finished){cleanup();reject(new Error('No response from Apps Script. Check the deployment and try again.'));}},25000);
+    window.addEventListener('message',onMessage);
+    document.body.appendChild(frame);document.body.appendChild(form);form.submit();
+  });
 }
-$('c-load').onclick=cLoad;
-$('c-pass').addEventListener('keydown',e=>{ if(e.key==='Enter') cLoad(); });
+function getCoordinatorToken(){try{return sessionStorage.getItem('ete-coordinator-session')||'';}catch(e){return '';}}
+function setCoordinatorToken(token){try{if(token)sessionStorage.setItem('ete-coordinator-session',token);else sessionStorage.removeItem('ete-coordinator-session');}catch(e){}}
+function showCoordinatorSession(on,username){
+  $('c-login').hidden=on; $('c-session').hidden=!on;
+  $('c-session-label').textContent=on?'Signed in as '+(username||'coordinator'):'';
+}
+async function cRefresh(){
+  const token=getCoordinatorToken();
+  if(!token){showCoordinatorSession(false);$('c-body').hidden=true;msg('c-msg','Please sign in to continue.','err');return;}
+  $('c-refresh').disabled=true;msg('c-msg','Loading submissions…','ok');
+  try{
+    const d=await coordinatorPost('coordData',{token});
+    if(!d||!d.ok){setCoordinatorToken('');showCoordinatorSession(false);$('c-body').hidden=true;msg('c-msg',(d&&d.error)||'Your session has expired. Please sign in again.','err');return;}
+    C={subs:d.subs||[],students:d.students||[]};
+    showCoordinatorSession(true,d.username);
+    msg('c-msg',C.subs.length?`Loaded ${C.subs.length} subject upload(s) from ${new Set(C.subs.map(s=>s.faculty)).size} faculty.`:'Connected, but no faculty has uploaded a subject yet.','ok');
+    $('c-body').hidden=false;cFill();cRender();
+  }catch(e){msg('c-msg',e.message||'Could not reach the Apps Script service.','err');}
+  finally{$('c-refresh').disabled=false;}
+}
+async function cLoad(){
+  if(!sheetReady()){msg('c-msg','The department sheet is not connected. Check SHEET_URL.','err');return;}
+  const username=$('c-username').value.trim(),password=$('c-password').value;
+  if(!username||!password){msg('c-msg','Enter both username and password.','err');return;}
+  $('c-login-btn').disabled=true;msg('c-msg','Signing in…','ok');
+  try{
+    const d=await coordinatorPost('coordLogin',{username,password});
+    $('c-password').value='';
+    if(!d||!d.ok){msg('c-msg',(d&&d.error)||'Sign-in failed.','err');return;}
+    setCoordinatorToken(d.token);showCoordinatorSession(true,d.username);
+    await cRefresh();
+  }catch(e){$('c-password').value='';msg('c-msg',e.message||'Could not reach the Apps Script service.','err');}
+  finally{$('c-login-btn').disabled=false;}
+}
+async function cLogout(){
+  const token=getCoordinatorToken();
+  try{if(token)await coordinatorPost('coordLogout',{token});}catch(e){}
+  setCoordinatorToken('');C={subs:[],students:[]};$('c-body').hidden=true;showCoordinatorSession(false);
+  msg('c-msg','You have been logged out.','ok');
+}
+$('c-login-btn').onclick=cLoad;
+$('c-password').addEventListener('keydown',e=>{if(e.key==='Enter')cLoad();});
+$('c-username').addEventListener('keydown',e=>{if(e.key==='Enter')cLoad();});
+$('c-refresh').onclick=cRefresh;$('c-logout').onclick=cLogout;
 ['c-ay','c-sem','c-code','c-cat'].forEach(id=>$(id).addEventListener('change',cRender));
 
 // ---- consolidated downloads
