@@ -740,8 +740,9 @@ function coordinatorPost(action, fields){
     let finished=false;
     const cleanup=()=>{window.removeEventListener('message',onMessage);form.remove();frame.remove();clearTimeout(timer);};
     const onMessage=event=>{
-      let originHost='';try{originHost=new URL(event.origin).hostname;}catch(e){return;}
-      if(!originHost.endsWith('.googleusercontent.com')) return;
+      // Apps Script may redirect the iframe response between Google hosts.
+      // Verify the exact iframe window rather than relying on a hostname suffix.
+      if(event.source!==frame.contentWindow) return;
       const d=event.data;
       if(!d||d.channel!=='ETE_COORDINATOR'||d.requestId!==requestId) return;
       finished=true; cleanup(); resolve(d.data);
