@@ -93,6 +93,9 @@ details.sub .body{padding:0 14px 14px;display:grid;gap:12px}
 input[readonly]{color:var(--muted)}
 .example-flag{font:600 11px var(--f-body);letter-spacing:.08em;text-transform:uppercase;color:var(--warn);background:var(--warn-soft);padding:2px 8px;border-radius:4px}
 @media (prefers-reduced-motion:no-preference){.btn,.chip,.tabs button{transition:background .15s,border-color .15s}}
+#view-submit[hidden],#view-consol[hidden],#c-body[hidden]{display:none}
+.subj{display:grid;gap:6px}
+.subj-h{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 12px;align-items:baseline}
 </style>
 </head>
 <body>
@@ -103,7 +106,10 @@ input[readonly]{color:var(--muted)}
     <div class="eyebrow">Dept. of Electronics &amp; Telecommunication Engg · SIT Tumakuru · NBA</div>
     <h1>Bright &amp; Weak Learner Identification</h1>
   </div>
-
+  <div class="tabs" role="tablist">
+    <button id="t-submit" role="tab" aria-selected="true" type="button">Faculty upload</button>
+    <button id="t-consol" role="tab" aria-selected="false" type="button">Coordinator view</button>
+  </div>
 </header>
 
 <!-- ================= SUBMIT VIEW ================= -->
@@ -181,6 +187,44 @@ input[readonly]{color:var(--muted)}
   </div>
 </section>
 
+<!-- ================= COORDINATOR VIEW ================= -->
+<section id="view-consol" class="stack" hidden>
+  <div class="panel">
+    <h2>Consolidated bright &amp; weak learners</h2>
+    <div class="hint">Shows every subject uploaded by faculty. Enter the coordinator passcode to load the data.</div>
+    <div id="c-setup" class="note" hidden></div>
+    <div class="grid">
+      <label>Coordinator passcode<input id="c-pass" type="password" autocomplete="off" placeholder="Passcode"></label>
+      <div class="row" style="align-self:end"><button class="btn primary" id="c-load" type="button">Load submissions</button></div>
+    </div>
+    <div id="c-msg" hidden></div>
+  </div>
+
+  <div class="panel" id="c-body" hidden>
+    <div class="grid">
+      <label>Academic year<select id="c-ay"></select></label>
+      <label>Semester<select id="c-sem"></select></label>
+      <label>Subject<select id="c-code"></select></label>
+      <label>Show<select id="c-cat">
+        <option value="B">Bright students</option>
+        <option value="W">Weak students</option>
+        <option value="BW">Bright and weak</option>
+      </select></label>
+    </div>
+    <div class="row" style="justify-content:space-between">
+      <h3 id="c-count">Subjects uploaded</h3>
+      <div class="row">
+        <button class="btn" id="c-csv" type="button">Download CSV</button>
+        <button class="btn" id="c-docx" type="button">Download Word report</button>
+        <button class="btn primary" id="c-pdf" type="button">Download PDF report</button>
+      </div>
+    </div>
+    <div id="c-dl" hidden></div>
+    <div class="tbl"><table id="c-subs"></table></div>
+    <h3 id="c-list-h">Student list</h3>
+    <div id="c-groups" class="stack"></div>
+  </div>
+</section>
 
 </div>
 
@@ -595,7 +639,7 @@ $('b-docx').onclick=async()=>{
 
 async function saveDept(m,o,res,lines){
   if(!SHEET_URL||/^PASTE/.test(SHEET_URL)) return '';
-  if(!m.faculty||!m.code||!m.sem) return 'Not sent to the department sheet: select your name, course code and semester, then click “Download PDF report”.';
+  if(!m.faculty||!m.code||!m.sem||!m.ay) return 'Not sent to the department sheet: select your name, course code, semester and academic year, then click “Download PDF report”.';
   const cat=x=>({B:'Bright',W:'Weak',A:'Absent'}[x.cat]||'');
   const payload={...m,maxT:o.maxT,maxQ:o.maxQ,brightRule:o.bMode,nBright:o.nBright,weakRule:o.wMode,weakParam:o.wParam,
     students:res.all.map(x=>({usn:x.usn,name:x.name,t1:x.t1,q1:x.q1,total:x.total,rank:x.rank,category:cat(x)})),
@@ -605,6 +649,180 @@ async function saveDept(m,o,res,lines){
     return `Sent to the department sheet for ${m.code} (Sem ${m.sem}${m.sec?' '+m.sec:''}).`; }
   catch(e){ return 'Could not reach the department sheet. Check your internet connection and click “Download PDF report” again.'; }
 }
+
+/* ---------- coordinator view ---------- */
+let C={subs:[],students:[]};
+const sheetReady=()=>!!SHEET_URL&&!/^PASTE/.test(SHEET_URL);
+const mark=v=>(v===''||v===null||v===undefined)?'AB':v;
+const catOrd={Bright:0,Weak:1};
+function showTab(w){
+  const c=w==='consol';
+  $('view-submit').hidden=c; $('view-consol').hidden=!c;
+  $('t-submit').setAttribute('aria-selected',String(!c)); $('t-consol').setAttribute('aria-selected',String(c));
+  if(c){ $('c-setup').textContent='The department sheet is not connected yet. Paste the Google Apps Script web-app URL into SHEET_URL in the page code, then reload.'; $('c-setup').hidden=sheetReady(); }
+}
+$('t-submit').onclick=()=>showTab('submit'); $('t-consol').onclick=()=>showTab('consol');
+
+function ruleShort(s){
+  const b=s.brightRule==='pct'?`≥ ${s.brightParam}%`:`Top ${s.brightParam}`;
+  const w=s.weakRule==='pct'?`< ${s.weakParam}%`:s.weakRule==='sd'?`< mean − ${s.weakParam} SD`:`Bottom ${s.weakParam}`;
+  return `Bright ${b} · Weak ${w}`;
+}
+function fillSel(id,items){
+  const el=$(id), cur=el.value;
+  el.innerHTML='<option value="">All</option>'+items.map(i=>`<option value="${esc(i.v)}">${esc(i.l)}</option>`).join('');
+  if([...el.options].some(o=>o.value===cur)) el.value=cur;
+}
+function cFill(){
+  const uniq=a=>[...new Set(a.map(String))];
+  fillSel('c-ay',uniq(C.subs.map(s=>s.academicYear)).sort().reverse().map(v=>({v,l:v})));
+  fillSel('c-sem',uniq(C.subs.map(s=>s.semester)).sort((a,b)=>a-b).map(v=>({v,l:'Semester '+v})));
+  const seen=new Map(); C.subs.forEach(s=>{ if(!seen.has(s.courseCode)) seen.set(s.courseCode,s.courseName); });
+  fillSel('c-code',[...seen].sort((a,b)=>String(a[0]).localeCompare(String(b[0]))).map(([v,n])=>({v,l:v+(n?' — '+n:'')})));
+}
+function cFiltered(){
+  const ay=$('c-ay').value, sem=$('c-sem').value, code=$('c-code').value, cat=$('c-cat').value;
+  const want=cat==='B'?['Bright']:cat==='W'?['Weak']:['Bright','Weak'];
+  const subs=C.subs.filter(s=>(!ay||String(s.academicYear)===ay)&&(!sem||String(s.semester)===sem)&&(!code||String(s.courseCode)===code));
+  const keys=new Set(subs.map(s=>s.key));
+  const rows=C.students.filter(x=>keys.has(x.key)&&want.includes(x.category));
+  return {subs,rows};
+}
+function cGroup(rows){
+  const m=new Map();
+  rows.forEach(x=>{
+    const k=x.academicYear+'|'+x.semester;
+    if(!m.has(k)) m.set(k,{ay:String(x.academicYear),sem:String(x.semester),subjects:new Map()});
+    const g=m.get(k);
+    if(!g.subjects.has(x.key)) g.subjects.set(x.key,{code:x.courseCode,cname:x.courseName,sec:x.section,faculty:x.faculty,rows:[]});
+    g.subjects.get(x.key).rows.push(x);
+  });
+  const byStu=(a,b)=>((catOrd[a.category]??9)-(catOrd[b.category]??9))||(Number(b.total)-Number(a.total))||String(a.usn).localeCompare(String(b.usn));
+  return [...m.values()]
+    .sort((a,b)=>b.ay.localeCompare(a.ay)||Number(a.sem)-Number(b.sem))
+    .map(g=>({ay:g.ay,sem:g.sem,subjects:[...g.subjects.values()]
+      .map(s=>({...s,rows:s.rows.sort(byStu)}))
+      .sort((a,b)=>String(a.code).localeCompare(String(b.code))||String(a.sec).localeCompare(String(b.sec)))}));
+}
+const tagC=c=>c==='Bright'?'<span class="tag b">Bright</span>':c==='Weak'?'<span class="tag w">Weak</span>':esc(c||'');
+const subjTitle=sb=>`${sb.code}${sb.cname?' — '+sb.cname:''}${sb.sec?' · Sec '+sb.sec:''}`;
+function cRender(){
+  const {subs,rows}=cFiltered();
+  const ordered=[...subs].sort((a,b)=>String(b.academicYear).localeCompare(String(a.academicYear))||Number(a.semester)-Number(b.semester)||String(a.courseCode).localeCompare(String(b.courseCode)));
+  const dt=s=>{const d=new Date(s.submittedAt); return isNaN(d)?'':d.toLocaleDateString('en-IN');};
+  $('c-count').textContent=`Subjects uploaded (${subs.length})`;
+  $('c-subs').innerHTML='<thead><tr><th>Year</th><th class="num">Sem</th><th>Course</th><th>Sec</th><th>Faculty</th><th class="num">Students</th><th class="num">Bright</th><th class="num">Weak</th><th>Rule</th><th>Uploaded</th></tr></thead><tbody>'+
+    (ordered.length?ordered.map(s=>`<tr><td>${esc(s.academicYear)}</td><td class="num">${esc(s.semester)}</td><td>${esc(s.courseCode)}${s.courseName?' — '+esc(s.courseName):''}</td><td>${esc(s.section)}</td><td>${esc(s.faculty)}</td><td class="num">${esc(s.students)}</td><td class="num">${esc(s.bright)}</td><td class="num">${esc(s.weak)}</td><td>${esc(ruleShort(s))}</td><td>${esc(dt(s))}</td></tr>`).join(''):'<tr><td colspan="10">No subjects match these filters.</td></tr>')+'</tbody>';
+  const g=cGroup(rows);
+  $('c-list-h').textContent=`Student list (${rows.length})`;
+  $('c-groups').innerHTML=g.length?g.map(grp=>`<div class="panel"><h3>${esc(grp.ay)} · Semester ${esc(grp.sem)}</h3>`+grp.subjects.map(sb=>
+    `<div class="subj"><div class="subj-h"><b>${esc(subjTitle(sb))}</b><span class="hint">${esc(sb.faculty)} · ${sb.rows.length} student(s)</span></div><div class="tbl"><table><thead><tr><th class="num">Sl</th><th>USN</th><th>Student name</th><th class="num">T1</th><th class="num">Q1</th><th class="num">Total</th><th>Category</th></tr></thead><tbody>`+
+    sb.rows.map((x,i)=>`<tr><td class="num">${i+1}</td><td class="usn">${esc(x.usn)}</td><td>${esc(x.name)}</td><td class="num">${esc(mark(x.t1))}</td><td class="num">${esc(mark(x.q1))}</td><td class="num">${esc(x.total)}</td><td>${tagC(x.category)}</td></tr>`).join('')+
+    '</tbody></table></div></div>').join('')+'</div>').join(''):'<div class="hint">No students match these filters.</div>';
+}
+async function cLoad(){
+  if(!sheetReady()){ msg('c-msg','The department sheet is not connected yet.','err'); return; }
+  const pass=$('c-pass').value.trim();
+  if(!pass){ msg('c-msg','Enter the coordinator passcode.','err'); return; }
+  msg('c-msg','Loading submissions…','ok'); $('c-load').disabled=true;
+  try{
+    const r=await fetch(SHEET_URL+(SHEET_URL.includes('?')?'&':'?')+'pass='+encodeURIComponent(pass));
+    const d=await r.json();
+    if(d.error){ msg('c-msg',d.error,'err'); $('c-body').hidden=true; return; }
+    C={subs:d.subs||[],students:d.students||[]};
+    msg('c-msg',C.subs.length?`Loaded ${C.subs.length} subject upload(s) from ${new Set(C.subs.map(s=>s.faculty)).size} faculty.`:'Connected, but no faculty has uploaded a subject yet.','ok');
+    $('c-body').hidden=false; cFill(); cRender();
+  }catch(e){ msg('c-msg','Could not reach the sheet. Check the web-app URL, that access is set to “Anyone”, and your internet connection.','err'); }
+  finally{ $('c-load').disabled=false; }
+}
+$('c-load').onclick=cLoad;
+$('c-pass').addEventListener('keydown',e=>{ if(e.key==='Enter') cLoad(); });
+['c-ay','c-sem','c-code','c-cat'].forEach(id=>$(id).addEventListener('change',cRender));
+
+// ---- consolidated downloads
+function cDesc(){
+  const cat=$('c-cat').value;
+  return `Academic year: ${$('c-ay').value||'All'}  |  Semester: ${$('c-sem').value||'All'}  |  Subject: ${$('c-code').value||'All'}  |  Showing: ${cat==='B'?'Bright learners':cat==='W'?'Weak learners':'Bright and weak learners'}`;
+}
+function cFileName(ext){
+  const cat=$('c-cat').value==='B'?'Bright':$('c-cat').value==='W'?'Weak':'Bright_Weak';
+  return `Consolidated_${cat}_${($('c-ay').value||'AllYears')}_${$('c-sem').value?'Sem'+$('c-sem').value:'AllSems'}${$('c-code').value?'_'+$('c-code').value:''}.${ext}`.replace(/\s+/g,'_');
+}
+function cCsvText(g){
+  const out=[['Academic year','Semester','Course code','Course name','Section','Faculty','USN','Student name','T1','Q1','Total','Rank','Category']];
+  g.forEach(grp=>grp.subjects.forEach(sb=>sb.rows.forEach(x=>out.push([grp.ay,grp.sem,sb.code,sb.cname,sb.sec,sb.faculty,x.usn,x.name,mark(x.t1),mark(x.q1),x.total,x.rank,x.category]))));
+  return out.map(r=>r.map(csvCell).join(',')).join('\n');
+}
+function cPdf(g,desc){
+  const doc=new window.jspdf.jsPDF({unit:'mm',format:'a4'}); const W=doc.internal.pageSize.getWidth(), H=doc.internal.pageSize.getHeight(), M=14;
+  const ink=[29,36,33], acc=[31,94,84], grn=[29,107,58], org=[163,70,29], mut=[91,102,97];
+  doc.setTextColor(...ink); doc.setFont('helvetica','bold'); doc.setFontSize(14);
+  doc.text('SIDDAGANGA INSTITUTE OF TECHNOLOGY, TUMAKURU',W/2,16,{align:'center'});
+  doc.setFont('helvetica','normal'); doc.setFontSize(10.5);
+  doc.text('Department of Electronics and Telecommunication Engineering',W/2,22,{align:'center'});
+  doc.setFont('helvetica','bold'); doc.setFontSize(12.5); doc.setTextColor(...acc);
+  doc.text('Consolidated List of Bright and Weak Learners',W/2,30,{align:'center'});
+  doc.setDrawColor(...acc); doc.setLineWidth(0.6); doc.line(M,33,W-M,33);
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...ink);
+  const dl=doc.splitTextToSize(pdfSafe(desc),W-2*M); doc.text(dl,M,38);
+  let y=38+dl.length*4+3;
+  g.forEach(grp=>grp.subjects.forEach(sb=>{
+    doc.autoTable({startY:y,margin:{left:M,right:M},rowPageBreak:'avoid',
+      head:[[{content:pdfSafe(`${grp.ay}  |  Semester ${grp.sem}  |  ${subjTitle(sb)}  |  ${sb.faculty}`),colSpan:7,styles:{halign:'left',fillColor:acc,textColor:255}}],['Sl','USN','Student Name','T1','Q1','Total','Category']],
+      body:sb.rows.map((x,i)=>[i+1,x.usn,pdfSafe(x.name),mark(x.t1),mark(x.q1),x.total,x.category]),
+      styles:{fontSize:8.8,cellPadding:1.3,textColor:ink,lineColor:[217,223,219],lineWidth:0.1},
+      headStyles:{fillColor:[240,243,241],textColor:ink,fontStyle:'bold'},
+      columnStyles:{0:{halign:'right',cellWidth:9},1:{font:'courier',cellWidth:30},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'}},
+      didParseCell:d=>{ if(d.section==='body'&&d.column.index===6){ const c=d.cell.raw; d.cell.styles.fontStyle='bold'; d.cell.styles.textColor=c==='Bright'?grn:c==='Weak'?org:ink; } }});
+    y=doc.lastAutoTable.finalY+6;
+  }));
+  const pages=doc.getNumberOfPages();
+  for(let p=1;p<=pages;p++){ doc.setPage(p); doc.setFontSize(7.5); doc.setTextColor(...mut); doc.text(`Page ${p} of ${pages}`,W-M,H-7,{align:'right'}); }
+  return doc.output('blob');
+}
+function cDocx(g,desc){
+  const {Document,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,AlignmentType,ShadingType,Footer,PageNumber}=window.docx;
+  const ACC='1F5E54', GRN='1D6B3A', ORG='A3461D';
+  const P=(t,o={})=>new Paragraph({alignment:o.align,spacing:{before:o.before||0,after:o.after??60},children:[new TextRun({text:String(t??''),bold:o.bold,size:o.size||20,color:o.color,font:o.font})]});
+  const W=[600,2100,3900,700,700,900,1100];
+  const cell=(t,i,o={})=>new TableCell({width:{size:W[i],type:WidthType.DXA},shading:o.fill?{fill:o.fill,type:ShadingType.CLEAR,color:'auto'}:undefined,margins:{top:30,bottom:30,left:80,right:80},children:[P(t,{bold:o.bold,color:o.color,size:18,align:o.align,after:0,font:o.font})]});
+  const R=AlignmentType.RIGHT, C2=AlignmentType.CENTER;
+  const kids=[P('SIDDAGANGA INSTITUTE OF TECHNOLOGY, TUMAKURU',{bold:true,size:28,align:C2}),
+    P('Department of Electronics and Telecommunication Engineering',{size:21,align:C2,after:60}),
+    P('Consolidated List of Bright and Weak Learners',{bold:true,size:24,color:ACC,align:C2,after:80}),
+    P(desc,{size:18,align:C2,after:160})];
+  g.forEach(grp=>grp.subjects.forEach(sb=>{
+    kids.push(P(`${grp.ay}  ·  Semester ${grp.sem}  ·  ${subjTitle(sb)}`,{bold:true,size:22,color:ACC,before:200,after:20}));
+    kids.push(P(`${sb.faculty}  ·  ${sb.rows.length} student(s)`,{size:18,color:'5B6661',after:60}));
+    kids.push(new Table({width:{size:10000,type:WidthType.DXA},columnWidths:W,rows:[
+      new TableRow({tableHeader:true,children:['Sl','USN','Student Name','T1','Q1','Total','Category'].map((h,i)=>cell(h,i,{bold:true,color:'FFFFFF',fill:ACC,align:(i===0||(i>=3&&i<=5))?R:undefined}))})
+    ].concat(sb.rows.map((x,i)=>{ const f=x.category==='Bright'?'E3F2E7':x.category==='Weak'?'FBE9DF':undefined; const cc=x.category==='Bright'?GRN:x.category==='Weak'?ORG:undefined;
+      return new TableRow({children:[cell(i+1,0,{fill:f,align:R}),cell(x.usn,1,{fill:f,font:'Consolas'}),cell(x.name,2,{fill:f}),cell(mark(x.t1),3,{fill:f,align:R}),cell(mark(x.q1),4,{fill:f,align:R}),cell(x.total,5,{fill:f,align:R}),cell(x.category,6,{fill:f,bold:true,color:cc})]}); }))}));
+  }));
+  return new Document({styles:{default:{document:{run:{font:'Calibri',size:20}}}},
+    sections:[{properties:{page:{margin:{top:900,bottom:900,left:900,right:900}}},
+      footers:{default:new Footer({children:[new Paragraph({alignment:R,children:[new TextRun({children:['Page ',PageNumber.CURRENT,' of ',PageNumber.TOTAL_PAGES],size:15,color:'5B6661'})]})]})},
+      children:kids}]});
+}
+function cGuard(){
+  const {rows}=cFiltered();
+  if(!rows.length){ msg('c-dl','Nothing to download for the chosen filters.','err'); return null; }
+  msg('c-dl',''); return cGroup(rows);
+}
+$('c-csv').onclick=()=>{ const g=cGuard(); if(g) save(cFileName('csv'),cCsvText(g)); };
+$('c-pdf').onclick=async()=>{
+  const g=cGuard(); if(!g) return;
+  if(!window.jspdf||!window.jspdf.jsPDF){ msg('c-dl','The PDF builder did not load. Reload the page and try again.','err'); return; }
+  try{ await downloads.save({filename:cFileName('pdf'),data:cPdf(g,cDesc())}); msg('c-dl','PDF report saved.','ok'); }
+  catch(e){ msg('c-dl','The PDF could not be made: '+((e&&(e.message||e.code))||'error'),'err'); }
+};
+$('c-docx').onclick=async()=>{
+  const g=cGuard(); if(!g) return;
+  if(!window.docx||!window.docx.Packer){ msg('c-dl','The Word builder did not load. Reload the page and try again.','err'); return; }
+  try{ const blob=await window.docx.Packer.toBlob(cDocx(g,cDesc())); await downloads.save({filename:cFileName('docx'),data:blob}); msg('c-dl','Word report saved.','ok'); }
+  catch(e){ msg('c-dl','The Word file could not be made: '+((e&&(e.message||e.code))||'error'),'err'); }
+};
+/* ---------- end coordinator view ---------- */
 
 syncBLabel(); syncWLabel(); render();
 </script>
