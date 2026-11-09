@@ -146,7 +146,11 @@ input[readonly]{color:var(--muted)}
     <div class="step"><div class="n">3</div><div>
       <h3>Set the selection rule</h3>
       <div class="grid">
-        <label>Number of bright students<input id="f-nb" type="number" min="1" value="5"></label>
+        <label>Bright students identified by<select id="f-bmode">
+          <option value="top">Top N in the class</option>
+          <option value="pct">At or above a % of maximum marks</option>
+        </select></label>
+        <label id="b-param-l">Number of bright students<input id="f-nb" type="number" min="0" step="any" value="5"></label>
         <label>Weak students identified by<select id="f-wmode">
           <option value="bottom">Bottom N in the class</option>
           <option value="sd">Below class mean − k × SD</option>
@@ -154,8 +158,9 @@ input[readonly]{color:var(--muted)}
         </select></label>
         <label id="w-param-l">Number of weak students<input id="f-wp" type="number" min="0" step="any" value="5"></label>
       </div>
-      <div class="row"><span class="hint">Quick pick for bright:</span><div class="chips" id="chips-b"></div></div>
-      <label style="display:flex;gap:8px;align-items:center;color:var(--ink);font-weight:400"><input type="checkbox" id="f-ties" checked style="width:auto"> Include students tied with the last selected score</label>
+      <div class="row"><button class="btn small" id="b-preset" type="button">Use 85% / 40% rule</button><span class="hint">Bright: total ≥ 85% of maximum · Weak: total below 40% of maximum</span></div>
+      <div class="row"><span class="hint" id="chips-b-label">Quick pick for bright:</span><div class="chips" id="chips-b"></div></div>
+      <label style="display:flex;gap:8px;align-items:center;color:var(--ink);font-weight:400"><input type="checkbox" id="f-ties" checked style="width:auto"> Include students tied with the last selected score <span class="hint">(applies to “Top N” / “Bottom N” only)</span></label>
     </div></div>
   </div>
 
@@ -226,7 +231,7 @@ function parseRows(rows){
   return {students,meta,warnings};
 }
 function categorise(students,o){
-  // o: {maxT,maxQ,nBright,wMode,wParam,ties}
+  // o: {maxT,maxQ,bMode ('top'|'pct'),nBright (count, or % when bMode='pct'),wMode,wParam,ties}
   const max=o.maxT+o.maxQ;
   const all=students.map(s=>{
     const absent=s.t1===null&&s.q1===null;
@@ -240,9 +245,17 @@ function categorise(students,o){
   const sd=n>1?Math.sqrt(sc.reduce((a,b)=>a+(b-mean)**2,0)/(n-1)):0;
   const srt=[...sc].sort((a,b)=>a-b); const median=n?(n%2?srt[(n-1)/2]:(srt[n/2-1]+srt[n/2])/2):0;
   const stats={n,absent:all.length-n,mean,sd,median,max:n?sc[0]:0,min:n?sc[n-1]:0,full:max};
-  const nb=Math.max(0,Math.min(Math.floor(o.nBright||0),n));
-  let bright=[], bCut=null;
-  if(nb>0){ bCut=ranked[nb-1].total; bright=o.ties?ranked.filter(s=>s.total>=bCut):ranked.slice(0,nb); }
+  const EPS=1e-9;
+  let bright=[], bCut=null, nb;
+  if(o.bMode==='pct'){
+    // Bright = total marks percentage at or above the threshold (e.g. 85% and above)
+    bCut=(o.nBright||0)/100*max;
+    bright=ranked.filter(s=>s.total>=bCut-EPS);
+    nb=bright.length;
+  }else{
+    nb=Math.max(0,Math.min(Math.floor(o.nBright||0),n));
+    if(nb>0){ bCut=ranked[nb-1].total; bright=o.ties?ranked.filter(s=>s.total>=bCut):ranked.slice(0,nb); }
+  }
   const bSet=new Set(bright.map(s=>s.usn));
   const pool=ranked.filter(s=>!bSet.has(s.usn));
   let weak=[], wCut=null;
@@ -252,7 +265,8 @@ function categorise(students,o){
   }else if(o.wMode==='sd'){
     wCut=mean-(o.wParam||0)*sd; weak=[...pool].reverse().filter(s=>s.total<wCut);
   }else{
-    wCut=(o.wParam||0)/100*max; weak=[...pool].reverse().filter(s=>s.total<wCut);
+    // Weak = total marks percentage below the threshold (e.g. below 40%)
+    wCut=(o.wParam||0)/100*max; weak=[...pool].reverse().filter(s=>s.total<wCut-EPS);
   }
   const wSet=new Set(weak.map(s=>s.usn));
   all.forEach(s=>{ s.cat=s.absent?'A':bSet.has(s.usn)?'B':wSet.has(s.usn)?'W':''; const r=ranked.find(x=>x.usn===s.usn); s.rank=r?r.rank:null; });
@@ -262,11 +276,12 @@ function f1(x){return (Math.round(x*100)/100).toString();}
 function ruleLines(res,o){
   const s=res.stats, L=[];
   L.push(`Score = T1 (out of ${o.maxT}) + Q1 (out of ${o.maxQ}) = ${s.full} marks. ${s.n} students ranked on score, highest first; equal scores broken by higher T1, then USN.`);
-  if(res.nb>0) L.push(`Bright learners: top ${res.nb} by rank${o.ties?' (plus any tied at the cut-off)':''} — score ≥ ${f1(res.bCut)} / ${s.full} (${f1(res.bCut/s.full*100)}%). ${res.bright.length} identified.`);
+  if(o.bMode==='pct') L.push(`Bright learners: total marks at or above ${o.nBright}% of maximum = ${f1(res.bCut)} / ${s.full}. ${res.bright.length} identified.`);
+  else if(res.nb>0) L.push(`Bright learners: top ${res.nb} by rank${o.ties?' (plus any tied at the cut-off)':''} — score ≥ ${f1(res.bCut)} / ${s.full} (${f1(res.bCut/s.full*100)}%). ${res.bright.length} identified.`);
   else L.push('Bright learners: none selected (count set to 0).');
   if(o.wMode==='bottom') L.push(`Weak learners: bottom ${Math.floor(o.wParam||0)} of the remaining students by rank${o.ties?' (plus any tied at the cut-off)':''}${res.wCut!==null?` — score ≤ ${f1(res.wCut)} / ${s.full} (${f1(res.wCut/s.full*100)}%)`:''}. ${res.weak.length} identified.`);
   else if(o.wMode==='sd') L.push(`Weak learners: score below class mean − ${o.wParam} × SD = ${f1(s.mean)} − ${o.wParam} × ${f1(s.sd)} = ${f1(res.wCut)} / ${s.full} (${f1(res.wCut/s.full*100)}%). ${res.weak.length} identified.`);
-  else L.push(`Weak learners: score below ${o.wParam}% of maximum = ${f1(res.wCut)} / ${s.full}. ${res.weak.length} identified.`);
+  else L.push(`Weak learners: total marks below ${o.wParam}% of maximum = ${f1(res.wCut)} / ${s.full}. ${res.weak.length} identified.`);
   L.push(`Class statistics: mean ${f1(s.mean)}, SD ${f1(s.sd)}, median ${f1(s.median)}, highest ${s.max}, lowest ${s.min}.`);
   if(s.absent) L.push(`${s.absent} student(s) with no T1 and Q1 marks (absent) are excluded from ranking and listed separately.`);
   return L;
@@ -414,11 +429,21 @@ const EXAMPLE=(()=>{const n=["AARAV K","BHAVANA S","CHIRAG M","DIVYA R","ESHWAR 
  return n.map((x,i)=>({usn:'1SI00ET'+String(901+i),name:x+' (example)',t1:i===10?null:t[i],q1:i===10?null:q[i]}));})();
 let students=EXAMPLE, isExample=true, lastRes=null;
 
-function opts(){return {maxT:Number($('f-maxt').value)||1,maxQ:Number($('f-maxq').value)||1,nBright:Number($('f-nb').value)||0,wMode:$('f-wmode').value,wParam:Number($('f-wp').value)||0,ties:$('f-ties').checked};}
+function opts(){return {maxT:Number($('f-maxt').value)||1,maxQ:Number($('f-maxq').value)||1,bMode:$('f-bmode').value,nBright:Number($('f-nb').value)||0,wMode:$('f-wmode').value,wParam:Number($('f-wp').value)||0,ties:$('f-ties').checked};}
+function syncBLabel(){
+  const m=$('f-bmode').value, l=$('b-param-l'), el=$('f-nb');
+  l.firstChild.textContent=m==='pct'?'Percentage threshold (%) — at or above':'Number of bright students';
+  if(el.dataset.mode!==m){
+    if(m==='pct'){ el.value=85; el.max=100; }
+    else { el.value=5; el.removeAttribute('max'); }
+    el.dataset.mode=m;
+  }
+  $('chips-b-label').textContent=m==='pct'?'Quick pick for bright (% of maximum):':'Quick pick for bright:';
+}
 function syncWLabel(){
   const m=$('f-wmode').value, l=$('w-param-l');
-  l.firstChild.textContent=m==='bottom'?'Number of weak students':m==='sd'?'k (number of SDs below mean)':'Percentage threshold (%)';
-  if(m==='bottom'&&!$('f-wp').dataset.touchedB) $('f-wp').value=$('f-nb').value;
+  l.firstChild.textContent=m==='bottom'?'Number of weak students':m==='sd'?'k (number of SDs below mean)':'Percentage threshold (%) — below';
+  if(m==='bottom'&&!$('f-wp').dataset.touchedB) $('f-wp').value=$('f-bmode').value==='top'?$('f-nb').value:5;
   if(m==='sd'&&$('f-wp').dataset.mode!=='sd') $('f-wp').value=1;
   if(m==='pct'&&$('f-wp').dataset.mode!=='pct') $('f-wp').value=40;
   $('f-wp').dataset.mode=m;
@@ -426,9 +451,12 @@ function syncWLabel(){
 function chips(){
   const n=students.filter(s=>s.t1!==null||s.q1!==null).length;
   const c=$('chips-b'); c.innerHTML='';
-  [[5,'5'],[10,'10'],[Math.max(1,Math.round(n*.1)),'Top 10%'],[Math.max(1,Math.round(n*.15)),'Top 15%'],[Math.max(1,Math.round(n*.2)),'Top 20%']].forEach(([v,l])=>{
-    const b=document.createElement('button'); b.className='chip'; b.textContent=l+(l.includes('%')?` (${v})`:''); b.setAttribute('aria-pressed',String(Number($('f-nb').value)===v));
-    b.onclick=()=>{$('f-nb').value=v; if($('f-wmode').value==='bottom'&&!$('f-wp').dataset.touchedB) $('f-wp').value=v; render();}; c.appendChild(b);});
+  const pctMode=$('f-bmode').value==='pct';
+  const list=pctMode?[[75,'≥ 75%'],[80,'≥ 80%'],[85,'≥ 85%'],[90,'≥ 90%']]
+    :[[5,'5'],[10,'10'],[Math.max(1,Math.round(n*.1)),'Top 10%'],[Math.max(1,Math.round(n*.15)),'Top 15%'],[Math.max(1,Math.round(n*.2)),'Top 20%']];
+  list.forEach(([v,l])=>{
+    const b=document.createElement('button'); b.className='chip'; b.type='button'; b.textContent=l+(!pctMode&&l.includes('%')?` (${v})`:''); b.setAttribute('aria-pressed',String(Number($('f-nb').value)===v));
+    b.onclick=()=>{$('f-nb').value=v; if(!pctMode&&$('f-wmode').value==='bottom'&&!$('f-wp').dataset.touchedB) $('f-wp').value=v; render();}; c.appendChild(b);});
 }
 function render(){
   const o=opts(); const res=categorise(students,o); lastRes=res; chips();
@@ -486,9 +514,16 @@ function readFile(file){
 }
 
 // ---- inputs
-['f-maxt','f-maxq','f-nb','f-ties'].forEach(id=>$(id).addEventListener('input',()=>{ if(id==='f-nb'&&$('f-wmode').value==='bottom'&&!$('f-wp').dataset.touchedB) $('f-wp').value=$('f-nb').value; render();}));
+['f-maxt','f-maxq','f-nb','f-ties'].forEach(id=>$(id).addEventListener('input',()=>{ if(id==='f-nb'&&$('f-bmode').value==='top'&&$('f-wmode').value==='bottom'&&!$('f-wp').dataset.touchedB) $('f-wp').value=$('f-nb').value; render();}));
 $('f-wp').addEventListener('input',()=>{ if($('f-wmode').value==='bottom') $('f-wp').dataset.touchedB='1'; render();});
+$('f-bmode').addEventListener('change',()=>{syncBLabel();syncWLabel();render();});
 $('f-wmode').addEventListener('change',()=>{syncWLabel();render();});
+// One-click preset: bright = 85% and above, weak = below 40%
+$('b-preset').addEventListener('click',()=>{
+  $('f-bmode').value='pct'; syncBLabel(); $('f-nb').value=85;
+  $('f-wmode').value='pct'; $('f-wp').dataset.mode=''; syncWLabel(); $('f-wp').value=40;
+  render();
+});
 // ---- report date: editable; random working day in the term when the report has none
 function defaultAy(sem){ const t=new Date(), Y=t.getFullYear(), mo=t.getMonth()+1;
   const odd=sem?Number(sem)%2===1:mo>=6; const st=odd?(mo>=6?Y:Y-1):(mo<=8?Y-1:Y); return `${st}-${String(st+1).slice(-2)}`; }
@@ -562,7 +597,7 @@ async function saveDept(m,o,res,lines){
   if(!SHEET_URL||/^PASTE/.test(SHEET_URL)) return '';
   if(!m.faculty||!m.code||!m.sem) return 'Not sent to the department sheet: select your name, course code and semester, then click “Download PDF report”.';
   const cat=x=>({B:'Bright',W:'Weak',A:'Absent'}[x.cat]||'');
-  const payload={...m,maxT:o.maxT,maxQ:o.maxQ,nBright:o.nBright,weakRule:o.wMode,weakParam:o.wParam,
+  const payload={...m,maxT:o.maxT,maxQ:o.maxQ,brightRule:o.bMode,nBright:o.nBright,weakRule:o.wMode,weakParam:o.wParam,
     students:res.all.map(x=>({usn:x.usn,name:x.name,t1:x.t1,q1:x.q1,total:x.total,rank:x.rank,category:cat(x)})),
     nStudents:res.stats.n,mean:Number(f1(res.stats.mean)),sd:Number(f1(res.stats.sd)),
     brightCount:res.bright.length,weakCount:res.weak.length,rule:lines.join(' | '),submittedAt:new Date().toISOString()};
@@ -571,7 +606,7 @@ async function saveDept(m,o,res,lines){
   catch(e){ return 'Could not reach the department sheet. Check your internet connection and click “Download PDF report” again.'; }
 }
 
-syncWLabel(); render();
+syncBLabel(); syncWLabel(); render();
 </script>
 </body>
 </html>
