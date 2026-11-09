@@ -586,7 +586,7 @@ $('f-rdate').addEventListener('input',()=>{ $('f-rdate').dataset.edited='1'; set
 $('f-faculty').addEventListener('change',()=>{try{localStorage.setItem('lc-faculty',$('f-faculty').value);}catch(e){}});
 
 // ---- settings: paste the Google Apps Script web-app URL here to collect submissions in a Google Sheet
-const SHEET_URL='PASTE_APPS_SCRIPT_WEB_APP_URL_HERE';
+const SHEET_URL='https://script.google.com/macros/s/AKfycbzYjyop-YyBlXEyJM5TDA11ZnH4cjLhAFzkwVHzuFycxLNqwuYTGtsjHFGSM6lTSVOQ/exec';
 const capsReady=Promise.resolve();
 const downloads={save:async({filename,data})=>{
   const blob=data instanceof Blob?data:new Blob([data],{type:'text/csv'});
