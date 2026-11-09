@@ -124,7 +124,9 @@ input[readonly]{color:var(--muted)}
         </div>
         <div class="row">
           <input type="file" id="f-file" accept=".xls,.xlsx,.csv" hidden>
+          <input type="file" id="f-files" accept=".xls,.xlsx,.csv" multiple hidden>
           <button class="btn primary" id="b-pick">Choose file</button>
+          <button class="btn" id="b-pick-many" type="button">Choose multiple files</button>
           <button class="btn" id="b-template">Get CSV template</button>
         </div>
       </div>
@@ -191,19 +193,18 @@ input[readonly]{color:var(--muted)}
 <section id="view-consol" class="stack" hidden>
   <div class="panel">
     <h2>Consolidated bright &amp; weak learners</h2>
-    <div class="hint">Sign in with the department coordinator account to view faculty submissions and download consolidated reports.</div>
+    <div class="hint">No sign-in required. View faculty submissions, upload multiple marks files, and download consolidated reports.</div>
     <div id="c-setup" class="note" hidden></div>
-    <div id="c-login" class="grid">
-      <label>Coordinator username<input id="c-username" type="text" autocomplete="username" placeholder="Username"></label>
-      <label>Coordinator password<input id="c-password" type="password" autocomplete="current-password" placeholder="Password"></label>
-      <div class="row" style="align-self:end"><button class="btn primary" id="c-login-btn" type="button">Sign in</button></div>
-    </div>
-    <div id="c-session" class="row" hidden>
-      <span class="hint" id="c-session-label">Signed in</span>
+    <div id="c-session" class="row">
+      <span class="hint" id="c-session-label">Coordinator access is open</span>
       <button class="btn small" id="c-refresh" type="button">Refresh submissions</button>
-      <button class="btn small danger" id="c-logout" type="button">Logout</button>
     </div>
     <div id="c-msg" hidden></div>
+    <div id="c-bulk-tools" class="row" style="margin-top:12px" hidden>
+      <input type="file" id="c-files" accept=".xls,.xlsx,.csv" multiple hidden>
+      <button class="btn" id="c-pick-many" type="button">Upload multiple marks files</button>
+      <span class="hint">Coordinator can add several Eligibility Reports; imported files are classified using Bright ≥85% and Weak <40%.</span>
+    </div>
   </div>
 
   <div class="panel" id="c-body" hidden>
@@ -527,10 +528,12 @@ function msg(el,text,kind){const e=$(el); e.hidden=!text; e.className='note'+(ki
 // ---- file handling
 $('b-pick').onclick=()=>$('f-file').click();
 $('f-file').onchange=e=>{ if(e.target.files[0]) readFile(e.target.files[0]); e.target.value=''; };
+$('b-pick-many').onclick=()=>$('f-files').click();
+$('f-files').onchange=async e=>{const files=[...(e.target.files||[])];e.target.value='';if(files.length)await facultyBatchUpload(files);};
 const drop=$('drop');
 ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
 ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
-drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0]; if(f) readFile(f);});
+drop.addEventListener('drop',e=>{const fs=[...(e.dataTransfer.files||[])].filter(f=>/\.(xlsx?|csv)$/i.test(f.name)); if(fs.length>1)facultyBatchUpload(fs);else if(fs[0])readFile(fs[0]);});
 function readFile(file){
   if(typeof XLSX==='undefined'){msg('parse-msg','The spreadsheet reader did not load. Reload the page and try again.','err');return;}
   const fr=new FileReader();
@@ -592,7 +595,7 @@ $('f-rdate').addEventListener('input',()=>{ $('f-rdate').dataset.edited='1'; set
 $('f-faculty').addEventListener('change',()=>{try{localStorage.setItem('lc-faculty',$('f-faculty').value);}catch(e){}});
 
 // ---- Google Apps Script web-app URL used for faculty uploads and coordinator login
-const SHEET_URL='https://script.google.com/macros/s/AKfycbzYjyop-YyBlXEyJM5TDA11ZnH4cjLhAFzkwVHzuFycxLNqwuYTGtsjHFGSM6lTSVOQ/exec';
+const SHEET_URL='https://script.google.com/macros/s/AKfycbxIGNvSlxxNjXDjnZOO2W6Or-VUrPV-3O-ulvez8KiMSP5jdFjT-NmQfpNKaxslXSvs/exec';
 const capsReady=Promise.resolve();
 const downloads={save:async({filename,data})=>{
   const blob=data instanceof Blob?data:new Blob([data],{type:'text/csv'});
@@ -643,17 +646,38 @@ $('b-docx').onclick=async()=>{
   }catch(e){ msg('submit-msg',e&&e.code==='declined'?'Download cancelled.':'The Word file could not be made ('+((e&&(e.code||e.message))||'error')+').',e&&e.code==='declined'?'':'err'); }
 };
 
-async function saveDept(m,o,res,lines){
-  if(!SHEET_URL||/^PASTE/.test(SHEET_URL)) return '';
-  if(!m.faculty||!m.code||!m.sem||!m.ay) return 'Not sent to the department sheet: select your name, course code, semester and academic year, then click “Download PDF report”.';
+async function saveDeptData(m,o,res,lines){
+  if(!SHEET_URL||/^PASTE/.test(SHEET_URL)) return {ok:false,message:'Apps Script URL is not configured.'};
+  if(!m.faculty||!m.code||!m.sem||!m.ay) return {ok:false,message:'Missing faculty, course code, semester or academic year.'};
   const cat=x=>({B:'Bright',W:'Weak',A:'Absent'}[x.cat]||'');
   const payload={...m,maxT:o.maxT,maxQ:o.maxQ,brightRule:o.bMode,nBright:o.nBright,weakRule:o.wMode,weakParam:o.wParam,
     students:res.all.map(x=>({usn:x.usn,name:x.name,t1:x.t1,q1:x.q1,total:x.total,rank:x.rank,category:cat(x)})),
     nStudents:res.stats.n,mean:Number(f1(res.stats.mean)),sd:Number(f1(res.stats.sd)),
     brightCount:res.bright.length,weakCount:res.weak.length,rule:lines.join(' | '),submittedAt:new Date().toISOString()};
   try{ await fetch(SHEET_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(payload)});
-    return `Sent to the department sheet for ${m.code} (Sem ${m.sem}${m.sec?' '+m.sec:''}).`; }
-  catch(e){ return 'Could not reach the department sheet. Check your internet connection and click “Download PDF report” again.'; }
+    return {ok:true,message:`Sent ${m.code} (Sem ${m.sem}${m.sec?' '+m.sec:''}) to the department sheet.`}; }
+  catch(e){ return {ok:false,message:'Could not reach the department sheet. Check your internet connection.'}; }
+}
+async function saveDept(m,o,res,lines){const r=await saveDeptData(m,o,res,lines);return r.ok?r.message:r.message;}
+function readWorkbookFile(file){
+  return new Promise((resolve,reject)=>{const fr=new FileReader();fr.onload=()=>{try{const wb=XLSX.read(new Uint8Array(fr.result),{type:'array'});const ws=wb.Sheets[wb.SheetNames[0]];resolve(parseRows(XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:true})));}catch(err){reject(err);}};fr.onerror=()=>reject(new Error('Could not read '+file.name));fr.readAsArrayBuffer(file);});
+}
+async function facultyBatchUpload(files){
+  if(typeof XLSX==='undefined'){msg('parse-msg','Spreadsheet reader did not load. Reload and try again.','err');return;}
+  const base=opts(), fallback=formMeta(), results=[];
+  msg('parse-msg',`Processing ${files.length} file(s)…`,'ok');
+  for(const file of files){
+    try{
+      const parsed=await readWorkbookFile(file), meta=parsed.meta;
+      const faculty=matchFaculty(meta.facultyRaw,FACULTY)||fallback.faculty;
+      const m={...fallback,faculty,code:String(meta.code||fallback.code||'').trim().toUpperCase(),sem:String(meta.sem||fallback.sem||''),ay:String(meta.ay||fallback.ay||''),prog:meta.program||fallback.prog||'',rdate:meta.reportDate||fallback.rdate||''};
+      const o={...base,maxT:Number(meta.maxT||base.maxT),maxQ:Number(meta.maxQ||base.maxQ)};
+      if(!m.faculty||!m.code||!m.sem||!m.ay){results.push(`${file.name}: skipped (missing faculty/course/semester/year; fill these in the form first).`);continue;}
+      const res=categorise(parsed.students,o), lines=ruleLines(res,o), saved=await saveDeptData(m,o,res,lines);
+      results.push(`${file.name}: ${saved.ok?'saved':'not saved'} — ${m.ay}, Sem ${m.sem}, ${m.code}; ${res.bright.length} bright students${saved.ok?'':` (${saved.message})`}`);
+    }catch(err){results.push(`${file.name}: failed — ${err.message||err}`);}
+  }
+  msg('parse-msg',results.join(' | '),results.every(x=>x.includes('saved —'))?'ok':'err');
 }
 
 /* ---------- coordinator view ---------- */
@@ -665,7 +689,7 @@ function showTab(w){
   const c=w==='consol';
   $('view-submit').hidden=c; $('view-consol').hidden=!c;
   $('t-submit').setAttribute('aria-selected',String(!c)); $('t-consol').setAttribute('aria-selected',String(c));
-  if(c){ $('c-setup').textContent='The department sheet is not connected yet. Check the Google Apps Script web-app URL in SHEET_URL.'; $('c-setup').hidden=sheetReady(); if(getCoordinatorToken()) { showCoordinatorSession(true,'coordinator'); cRefresh(); } }
+  if(c){ $('c-setup').textContent='The department sheet is not connected yet. Check the Google Apps Script web-app URL in SHEET_URL.'; $('c-setup').hidden=sheetReady(); cRefresh(); }
 }
 $('t-submit').onclick=()=>showTab('submit'); $('t-consol').onclick=()=>showTab('consol');
 
@@ -726,6 +750,34 @@ function cRender(){
     sb.rows.map((x,i)=>`<tr><td class="num">${i+1}</td><td class="usn">${esc(x.usn)}</td><td>${esc(x.name)}</td><td class="num">${esc(mark(x.t1))}</td><td class="num">${esc(mark(x.q1))}</td><td class="num">${esc(x.total)}</td><td>${tagC(x.category)}</td></tr>`).join('')+
     '</tbody></table></div></div>').join('')+'</div>').join(''):'<div class="hint">No students match these filters.</div>';
 }
+// Coordinator multi-file import: parse Eligibility Reports, classify, and persist them in Sheets.
+$('c-pick-many').onclick=()=>$('c-files').click();
+$('c-files').onchange=async e=>{
+  const files=[...(e.target.files||[])];e.target.value='';if(!files.length)return;
+  if(typeof XLSX==='undefined'){msg('c-msg','Spreadsheet reader did not load. Reload the page and try again.','err');return;}
+  const batch=[],errors=[];
+  msg('c-msg',`Reading ${files.length} file(s)…`,'ok');
+  for(const file of files){
+    try{
+      const parsed=await readWorkbookFile(file),m=parsed.meta;
+      if(!m.code||!m.sem||!m.ay)throw new Error('Course code, semester or academic year could not be read from this report.');
+      const o={maxT:Number(m.maxT||34),maxQ:Number(m.maxQ||8),bMode:'pct',nBright:85,wMode:'pct',wParam:40,ties:true};
+      const res=categorise(parsed.students,o),faculty=matchFaculty(m.facultyRaw,FACULTY)||m.facultyRaw||'Not specified';
+      const lines=ruleLines(res,o);
+      batch.push({ay:m.ay,sem:m.sem,code:m.code,cname:'',sec:'',faculty,maxT:o.maxT,maxQ:o.maxQ,brightRule:'pct',nBright:85,weakRule:'pct',weakParam:40,
+        nStudents:res.stats.n,mean:Number(f1(res.stats.mean)),sd:Number(f1(res.stats.sd)),brightCount:res.bright.length,weakCount:res.weak.length,
+        rule:lines.join(' | '),submittedAt:new Date().toISOString(),students:res.all.map(x=>({usn:x.usn,name:x.name,t1:x.t1,q1:x.q1,total:x.total,rank:x.rank,category:({B:'Bright',W:'Weak',A:'Absent'}[x.cat]||'')}))});
+    }catch(err){errors.push(`${file.name}: ${err.message||err}`);}
+  }
+  if(!batch.length){msg('c-msg','No files could be imported. '+errors.join(' | '),'err');return;}
+  try{
+    const d=await coordinatorPost('coordImport',{payload:JSON.stringify(batch)});
+    if(!d||!d.ok)throw new Error((d&&d.error)||'The Apps Script import was not confirmed.');
+    await cRefresh();
+    msg('c-msg',`${d.imported} file(s) saved to Google Sheets; ${d.students} student records imported. Bright rule: ≥85%; Weak rule: <40%.${errors.length?' Skipped: '+errors.join(' | '):''}`,'ok');
+  }catch(err){msg('c-msg','Bulk import failed: '+(err.message||err)+(errors.length?' | '+errors.join(' | '):''),'err');}
+};
+
 // Coordinator API: form POST into a hidden iframe avoids putting credentials or
 // session tokens in URLs and avoids relying on cross-origin fetch response headers.
 function coordinatorPost(action, fields){
@@ -740,9 +792,14 @@ function coordinatorPost(action, fields){
     let finished=false;
     const cleanup=()=>{window.removeEventListener('message',onMessage);form.remove();frame.remove();clearTimeout(timer);};
     const onMessage=event=>{
-      // Apps Script may redirect the iframe response between Google hosts.
-      // Verify the exact iframe window rather than relying on a hostname suffix.
-      if(event.source!==frame.contentWindow) return;
+      // Apps Script may relay HtmlService output through a nested Google frame.
+      // Validate the sender's Google origin and this request's unguessable ID;
+      // do not require event.source to equal the outer iframe window.
+      let host='';
+      try { host = new URL(event.origin).hostname; } catch (_) { return; }
+      const trustedOrigin = host === 'script.google.com' ||
+        host === 'script.googleusercontent.com' || host.endsWith('.googleusercontent.com');
+      if (!trustedOrigin) return;
       const d=event.data;
       if(!d||d.channel!=='ETE_COORDINATOR'||d.requestId!==requestId) return;
       finished=true; cleanup(); resolve(d.data);
@@ -752,50 +809,19 @@ function coordinatorPost(action, fields){
     document.body.appendChild(frame);document.body.appendChild(form);form.submit();
   });
 }
-function getCoordinatorToken(){try{return sessionStorage.getItem('ete-coordinator-session')||'';}catch(e){return '';}}
-function setCoordinatorToken(token){try{if(token)sessionStorage.setItem('ete-coordinator-session',token);else sessionStorage.removeItem('ete-coordinator-session');}catch(e){}}
-function showCoordinatorSession(on,username){
-  $('c-login').hidden=on; $('c-session').hidden=!on;
-  $('c-session-label').textContent=on?'Signed in as '+(username||'coordinator'):'';
-}
 async function cRefresh(){
-  const token=getCoordinatorToken();
-  if(!token){showCoordinatorSession(false);$('c-body').hidden=true;msg('c-msg','Please sign in to continue.','err');return;}
+  if(!sheetReady()){msg('c-msg','The department sheet is not connected. Check SHEET_URL.','err');return;}
   $('c-refresh').disabled=true;msg('c-msg','Loading submissions…','ok');
   try{
-    const d=await coordinatorPost('coordData',{token});
-    if(!d||!d.ok){setCoordinatorToken('');showCoordinatorSession(false);$('c-body').hidden=true;msg('c-msg',(d&&d.error)||'Your session has expired. Please sign in again.','err');return;}
+    const d=await coordinatorPost('coordData',{});
+    if(!d||!d.ok){$('c-body').hidden=true;msg('c-msg',(d&&d.error)||'Could not load submissions.','err');return;}
     C={subs:d.subs||[],students:d.students||[]};
-    showCoordinatorSession(true,d.username);
     msg('c-msg',C.subs.length?`Loaded ${C.subs.length} subject upload(s) from ${new Set(C.subs.map(s=>s.faculty)).size} faculty.`:'Connected, but no faculty has uploaded a subject yet.','ok');
-    $('c-body').hidden=false;cFill();cRender();
+    $('c-body').hidden=false;$('c-bulk-tools').hidden=false;cFill();cRender();
   }catch(e){msg('c-msg',e.message||'Could not reach the Apps Script service.','err');}
   finally{$('c-refresh').disabled=false;}
 }
-async function cLoad(){
-  if(!sheetReady()){msg('c-msg','The department sheet is not connected. Check SHEET_URL.','err');return;}
-  const username=$('c-username').value.trim(),password=$('c-password').value;
-  if(!username||!password){msg('c-msg','Enter both username and password.','err');return;}
-  $('c-login-btn').disabled=true;msg('c-msg','Signing in…','ok');
-  try{
-    const d=await coordinatorPost('coordLogin',{username,password});
-    $('c-password').value='';
-    if(!d||!d.ok){msg('c-msg',(d&&d.error)||'Sign-in failed.','err');return;}
-    setCoordinatorToken(d.token);showCoordinatorSession(true,d.username);
-    await cRefresh();
-  }catch(e){$('c-password').value='';msg('c-msg',e.message||'Could not reach the Apps Script service.','err');}
-  finally{$('c-login-btn').disabled=false;}
-}
-async function cLogout(){
-  const token=getCoordinatorToken();
-  try{if(token)await coordinatorPost('coordLogout',{token});}catch(e){}
-  setCoordinatorToken('');C={subs:[],students:[]};$('c-body').hidden=true;showCoordinatorSession(false);
-  msg('c-msg','You have been logged out.','ok');
-}
-$('c-login-btn').onclick=cLoad;
-$('c-password').addEventListener('keydown',e=>{if(e.key==='Enter')cLoad();});
-$('c-username').addEventListener('keydown',e=>{if(e.key==='Enter')cLoad();});
-$('c-refresh').onclick=cRefresh;$('c-logout').onclick=cLogout;
+$('c-refresh').onclick=()=>cRefresh();
 ['c-ay','c-sem','c-code','c-cat'].forEach(id=>$(id).addEventListener('change',cRender));
 
 // ---- consolidated downloads
@@ -806,6 +832,18 @@ function cDesc(){
 function cFileName(ext){
   const cat=$('c-cat').value==='B'?'Bright':$('c-cat').value==='W'?'Weak':'Bright_Weak';
   return `Consolidated_${cat}_${($('c-ay').value||'AllYears')}_${$('c-sem').value?'Sem'+$('c-sem').value:'AllSems'}${$('c-code').value?'_'+$('c-code').value:''}.${ext}`.replace(/\s+/g,'_');
+}
+// Word report is intentionally Bright-only, regardless of the on-screen Show filter.
+// Academic year, semester and subject filters still apply.
+function cBrightReportGroups(){
+  const ay=$('c-ay').value, sem=$('c-sem').value, code=$('c-code').value;
+  const subs=C.subs.filter(s=>(!ay||String(s.academicYear)===ay)&&(!sem||String(s.semester)===sem)&&(!code||String(s.courseCode)===code));
+  const keys=new Set(subs.map(s=>s.key));
+  const rows=C.students.filter(x=>keys.has(x.key)&&String(x.category||'').toLowerCase()==='bright');
+  return cGroup(rows);
+}
+function cBrightFileName(){
+  return `Consolidated_Bright_Students_${($('c-ay').value||'AllYears')}_${$('c-sem').value?'Sem'+$('c-sem').value:'AllSems'}${$('c-code').value?'_'+$('c-code').value:''}.docx`.replace(/\s+/g,'_');
 }
 function cCsvText(g){
   const out=[['Academic year','Semester','Course code','Course name','Section','Faculty','USN','Student name','T1','Q1','Total','Rank','Category']];
@@ -841,23 +879,32 @@ function cPdf(g,desc){
 }
 function cDocx(g,desc){
   const {Document,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,AlignmentType,ShadingType,Footer,PageNumber}=window.docx;
-  const ACC='1F5E54', GRN='1D6B3A', ORG='A3461D';
+  const ACC='1F5E54', GRN='1D6B3A';
   const P=(t,o={})=>new Paragraph({alignment:o.align,spacing:{before:o.before||0,after:o.after??60},children:[new TextRun({text:String(t??''),bold:o.bold,size:o.size||20,color:o.color,font:o.font})]});
-  const W=[600,2100,3900,700,700,900,1100];
-  const cell=(t,i,o={})=>new TableCell({width:{size:W[i],type:WidthType.DXA},shading:o.fill?{fill:o.fill,type:ShadingType.CLEAR,color:'auto'}:undefined,margins:{top:30,bottom:30,left:80,right:80},children:[P(t,{bold:o.bold,color:o.color,size:18,align:o.align,after:0,font:o.font})]});
+  const W=[650,2050,3700,850,850,1050,850];
+  const cell=(t,i,o={})=>new TableCell({width:{size:W[i],type:WidthType.DXA},shading:o.fill?{fill:o.fill,type:ShadingType.CLEAR,color:'auto'}:undefined,margins:{top:45,bottom:45,left:85,right:85},children:[P(t,{bold:o.bold,color:o.color,size:18,align:o.align,after:0,font:o.font})]});
   const R=AlignmentType.RIGHT, C2=AlignmentType.CENTER;
-  const kids=[P('SIDDAGANGA INSTITUTE OF TECHNOLOGY, TUMAKURU',{bold:true,size:28,align:C2}),
-    P('Department of Electronics and Telecommunication Engineering',{size:21,align:C2,after:60}),
-    P('Consolidated List of Bright and Weak Learners',{bold:true,size:24,color:ACC,align:C2,after:80}),
-    P(desc,{size:18,align:C2,after:160})];
-  g.forEach(grp=>grp.subjects.forEach(sb=>{
-    kids.push(P(`${grp.ay}  ·  Semester ${grp.sem}  ·  ${subjTitle(sb)}`,{bold:true,size:22,color:ACC,before:200,after:20}));
-    kids.push(P(`${sb.faculty}  ·  ${sb.rows.length} student(s)`,{size:18,color:'5B6661',after:60}));
-    kids.push(new Table({width:{size:10000,type:WidthType.DXA},columnWidths:W,rows:[
-      new TableRow({tableHeader:true,children:['Sl','USN','Student Name','T1','Q1','Total','Category'].map((h,i)=>cell(h,i,{bold:true,color:'FFFFFF',fill:ACC,align:(i===0||(i>=3&&i<=5))?R:undefined}))})
-    ].concat(sb.rows.map((x,i)=>{ const f=x.category==='Bright'?'E3F2E7':x.category==='Weak'?'FBE9DF':undefined; const cc=x.category==='Bright'?GRN:x.category==='Weak'?ORG:undefined;
-      return new TableRow({children:[cell(i+1,0,{fill:f,align:R}),cell(x.usn,1,{fill:f,font:'Consolas'}),cell(x.name,2,{fill:f}),cell(mark(x.t1),3,{fill:f,align:R}),cell(mark(x.q1),4,{fill:f,align:R}),cell(x.total,5,{fill:f,align:R}),cell(x.category,6,{fill:f,bold:true,color:cc})]}); }))}));
-  }));
+  const totalStudents=g.reduce((n,grp)=>n+grp.subjects.reduce((m,sb)=>m+sb.rows.length,0),0);
+  const kids=[P('SIDDAGANGA INSTITUTE OF TECHNOLOGY, TUMAKURU',{bold:true,size:28,align:C2,after:40}),
+    P('Department of Electronics and Telecommunication Engineering',{size:21,align:C2,after:80}),
+    P('CONSOLIDATED LIST OF BRIGHT STUDENTS',{bold:true,size:26,color:ACC,align:C2,after:80}),
+    P(desc,{size:18,align:C2,after:40}),
+    P(`Total bright students: ${totalStudents}`,{bold:true,size:20,color:GRN,align:C2,after:160})];
+  g.forEach(grp=>{
+    kids.push(P(`ACADEMIC YEAR: ${grp.ay}   |   SEMESTER: ${grp.sem}`,{bold:true,size:23,color:ACC,before:220,after:80}));
+    grp.subjects.forEach(sb=>{
+      const title=`${sb.code||'Subject'}${sb.cname?' — '+sb.cname:''}${sb.sec?' · Section '+sb.sec:''}`;
+      kids.push(P(title,{bold:true,size:22,before:100,after:20}));
+      kids.push(P(`${sb.faculty||'Faculty not specified'}   |   ${sb.rows.length} bright student(s)`,{size:18,color:'5B6661',after:60}));
+      kids.push(new Table({width:{size:10000,type:WidthType.DXA},columnWidths:W,rows:[
+        new TableRow({tableHeader:true,children:['Sl. No.','USN','Student Name','T1','Q1','Total','Rank'].map((h,i)=>cell(h,i,{bold:true,color:'FFFFFF',fill:ACC,align:(i===0||(i>=3))?R:undefined}))})
+      ].concat(sb.rows.map((x,i)=>new TableRow({children:[
+        cell(i+1,0,{fill:'E3F2E7',align:R}),cell(x.usn,1,{fill:'E3F2E7',font:'Consolas'}),cell(x.name,2,{fill:'E3F2E7'}),
+        cell(mark(x.t1),3,{fill:'E3F2E7',align:R}),cell(mark(x.q1),4,{fill:'E3F2E7',align:R}),
+        cell(x.total,5,{fill:'E3F2E7',align:R,bold:true,color:GRN}),cell(x.rank??'',6,{fill:'E3F2E7',align:R})
+      ]})))}));
+    });
+  });
   return new Document({styles:{default:{document:{run:{font:'Calibri',size:20}}}},
     sections:[{properties:{page:{margin:{top:900,bottom:900,left:900,right:900}}},
       footers:{default:new Footer({children:[new Paragraph({alignment:R,children:[new TextRun({children:['Page ',PageNumber.CURRENT,' of ',PageNumber.TOTAL_PAGES],size:15,color:'5B6661'})]})]})},
@@ -876,9 +923,12 @@ $('c-pdf').onclick=async()=>{
   catch(e){ msg('c-dl','The PDF could not be made: '+((e&&(e.message||e.code))||'error'),'err'); }
 };
 $('c-docx').onclick=async()=>{
-  const g=cGuard(); if(!g) return;
+  const g=cBrightReportGroups();
+  const count=g.reduce((n,grp)=>n+grp.subjects.reduce((m,sb)=>m+sb.rows.length,0),0);
+  if(!count){msg('c-dl','No Bright students found for the selected academic year, semester and subject.','err');return;}
   if(!window.docx||!window.docx.Packer){ msg('c-dl','The Word builder did not load. Reload the page and try again.','err'); return; }
-  try{ const blob=await window.docx.Packer.toBlob(cDocx(g,cDesc())); await downloads.save({filename:cFileName('docx'),data:blob}); msg('c-dl','Word report saved.','ok'); }
+  const desc=`Academic year: ${$('c-ay').value||'All'}  |  Semester: ${$('c-sem').value||'All'}  |  Subject: ${$('c-code').value||'All'}  |  Category: Bright students only`;
+  try{ const blob=await window.docx.Packer.toBlob(cDocx(g,desc)); await downloads.save({filename:cBrightFileName(),data:blob}); msg('c-dl',`Bright-student Word report saved (${count} students).`,'ok'); }
   catch(e){ msg('c-dl','The Word file could not be made: '+((e&&(e.message||e.code))||'error'),'err'); }
 };
 /* ---------- end coordinator view ---------- */
